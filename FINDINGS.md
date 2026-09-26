@@ -218,7 +218,26 @@ Two workloads, 128 output tokens, greedy, arms alternated (off, on, off, on):
   tokens took 8.3 s without caching and 1.6 s with it.
 - All five pre-registered predictions held.
 
-<!-- PENDING: SGLang (RadixAttention) on the same workloads. -->
+**SGLang** (its version is called RadixAttention), same workloads, both runs
+of each arm:
+
+| Concurrent | Output tok/s, off → on | First token, median, off → on |
+|---|---|---|
+| 1 | 83 → 116 (+40%) | 544 → 71 ms (7.7x faster) |
+| 4 | 156 → 345 (2.2x) | 1,904 → 236 ms (8.1x) |
+| 16 | 202 → 805 (4.0x) | 4,984 → 842 ms (5.9x) |
+
+The control again moved less than 1.5%.
+
+**The two schedulers differ in who waits.** With 16 long prompts and no
+caching, both engines produced the same throughput (197 vs 202 tokens/s).
+- vLLM mixed the long prefills into every step: first tokens came sooner
+  (1.9 s median), but each output token took 66 ms.
+- SGLang held prefills back: tokens streamed at 41 ms each, but the first
+  one took 5.0 s.
+
+Same work, different people waiting. It's the trade-off from section 2,
+sharper under prompt-heavy load.
 
 ## 9. Speculative decoding
 

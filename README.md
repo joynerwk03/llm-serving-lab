@@ -63,8 +63,8 @@ grade-school math benchmark (GSM8K, 1,319 questions), the 4-bit model scored
 86.7% against full precision's 88.3%. That gap is small, but a paired test
 says it's real (p = 0.04).
 
-<!-- PENDING (running 2026-09-26): speculative decoding; SGLang caching;
-the 4-bit replicate. -->
+<!-- PENDING (running 2026-09-26): speculative decoding; the 4-bit
+replicate. -->
 
 More detail, with every setup and table: [FINDINGS.md](FINDINGS.md).
 
