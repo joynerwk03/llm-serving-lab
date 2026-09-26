@@ -52,8 +52,19 @@ used a third of the GPU's graphics engine, and serving throughput dropped
 accordingly. Since then, every measurement here runs with a monitor that
 logs other programs using the GPU.
 
-<!-- PENDING (running 2026-09-26): prefix caching, speculative decoding,
-4-bit vs full-precision quality. Fill from FINDINGS.md when results land. -->
+**Reusing a shared prompt changes everything downstream of it.** When every
+request began with the same 2,000-token prompt (like a chatbot's system
+prompt), caching it made the first token arrive 6.6x sooner for one user and
+more than tripled throughput for sixteen. With nothing shared, it cost
+nothing.
+
+**4-bit weights are 2.5x faster and measurably less accurate.** On a
+grade-school math benchmark (GSM8K, 1,319 questions), the 4-bit model scored
+86.7% against full precision's 88.3%. That gap is small, but a paired test
+says it's real (p = 0.04).
+
+<!-- PENDING (running 2026-09-26): speculative decoding; SGLang caching;
+the 4-bit replicate. -->
 
 More detail, with every setup and table: [FINDINGS.md](FINDINGS.md).
 

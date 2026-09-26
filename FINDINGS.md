@@ -187,10 +187,38 @@ max length 4,096), [lm-evaluation-harness](https://github.com/EleutherAI/lm-eval
 
 <!-- PENDING: the AWQ-vs-AWQ replicate (the noise floor for this test). -->
 
-## 8. Prefix caching
+## 8. Prefix caching: a shared prompt, computed once
 
-<!-- PENDING (running 2026-09-26): 2,000-token shared prefix + 200 unique
-tokens vs 2,200 unique tokens; caching on vs off; vLLM and SGLang. -->
+Many requests share a long beginning: a chatbot's system prompt, or a
+document that many questions are asked about. Prefix caching keeps the KV
+cache (the model's computed working state) for that shared part and reuses
+it, instead of recomputing it for every request.
+
+Two workloads, 128 output tokens, greedy, arms alternated (off, on, off, on):
+- **Shared:** a 2,000-token prefix common to every request, plus 200 unique
+  tokens.
+- **Unique (the control):** 2,200 unique tokens, nothing shared.
+
+**vLLM, shared prefix,** both runs of each arm:
+
+| Concurrent | Output tok/s, off → on | First token, median, off → on | Time per token, off → on |
+|---|---|---|---|
+| 1 | 75 → 99 (+32%) | 519 → 79 ms (6.6x faster) | 9.3 → 9.3 ms |
+| 4 | 150 → 304 (2.0x) | 1,526 → 227 ms (6.7x) | 15.1 → 10.9 ms |
+| 16 | 197 → 667 (3.4x) | 1,938 → 724 ms (2.7x) | 66.2 → 17.5 ms |
+
+- **The control moved less than 1%** at every level: caching costs nothing
+  measurable when nothing is shared. Cache hits were 85-90% of prompt tokens
+  on the shared workload and 0% on the control, exactly as the arithmetic
+  predicts.
+- **Without caching, long prompts slow everyone's streaming.** At 16
+  requests, each output token took 66 ms instead of 17.5, because every step
+  also carried pieces of someone's 2,200-token prompt.
+- **The tail is where it shows most:** at 16 requests the slowest first
+  tokens took 8.3 s without caching and 1.6 s with it.
+- All five pre-registered predictions held.
+
+<!-- PENDING: SGLang (RadixAttention) on the same workloads. -->
 
 ## 9. Speculative decoding
 
