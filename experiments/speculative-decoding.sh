@@ -43,7 +43,9 @@ for arm in none draft ngram none draft ngram; do
     ngram) flags+=(--speculative-config "$NGRAM") ;;
   esac
   mark "sd $label start"
-  if DOCKER_MOUNTS="${MODELS:-$HOME/models}/Qwen3-0.6B:/models/Qwen3-0.6B:ro" \
+  # V1 runner in every arm: vLLM 0.30.0's V2 runner doesn't support ngram or
+  # draft_model, so those arms fall back to V1; the baseline must match.
+  if DOCKER_ENV="VLLM_USE_V2_MODEL_RUNNER=0" DOCKER_MOUNTS="${MODELS:-$HOME/models}/Qwen3-0.6B:/models/Qwen3-0.6B:ro" \
        bash scripts/docker-vllm.sh start "sd-$label" bind "${flags[@]}" | tee -a "$TIMELINE"; then
     LEVELS="4:16" SEED_BASE=$((7000 + 100 * i)) bash scripts/sweep.sh "$O/warmup-$label" --temperature 0 \
       > "logs/sd-warmup-$label.log" 2>&1
