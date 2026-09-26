@@ -35,6 +35,11 @@ two engines' GPU work per step within 5% of each other: most of the gap was
 vLLM's idle time. With pinned memory on, vLLM's 64-user throughput (1,690
 tokens/s) matched SGLang's (1,697).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/decode-step-dark.png">
+  <img alt="Time per output token for one request: vLLM with the WSL2 default 8.85 ms (7.56 busy, 1.29 idle), vLLM with pinned memory 7.77 ms (7.61 busy, 0.16 idle), SGLang 7.29 ms (7.15 busy, 0.14 idle); the memory-bandwidth floor is 5.2 ms" src="images/decode-step-light.png">
+</picture>
+
 **How you test changes what you see.** With a fixed set of 16 clients that
 each wait for their answer, requests arrive in synchronized waves, and the
 first token took ~830 ms. With requests arriving at random times (a Poisson
