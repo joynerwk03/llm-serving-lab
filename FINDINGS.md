@@ -110,6 +110,13 @@ In the profile of one 64-token request:
 - A fixed ~1.1-1.2 ms per step whatever the model's size: ~12% of a 9 ms
   step, ~5.5% of a 21 ms one.
 - Throughput (full sweep): +14% at 1 request, +13% at 4, +8% at 16, +3.8% at 64.
+- **It's specific to vLLM's newer (V2) model runner.** On the older V1
+  runner (`VLLM_USE_V2_MODEL_RUNNER=0`), same machine, session and request,
+  the default cost nothing.
+  - V1: 7.66 ms per token, GPU idle 0.04 ms per step, and no faster with the
+    setting on.
+  - V2: 8.98 ms, with 17 `cudaStreamSynchronize` calls per step.
+  - Measured with section 9's profiling, one session, not alternated.
 - **Alternatives ruled out before filing.**
   - Drift: every off run is slower than every on run; the ranges never
     overlap.
@@ -178,14 +185,17 @@ max length 4,096), [lm-evaluation-harness](https://github.com/EleutherAI/lm-eval
 | GSM8K, strict-match | 86.4% | 88.0% |
 | Time per token, 1 request | 9.0 ms | 22.1 ms |
 
-- **The paired test finds a real, small cost.** The runs disagree on 104
+- **The paired test finds a small cost.** The runs disagree on 104
   questions; full precision wins 63 of them and 4-bit 41 (McNemar exact test,
   p = 0.039). Comparing the two accuracies alone (±0.9 each) couldn't show
   that.
+- **The disagreements come from the quantization, not noise.** A rerun of
+  the 4-bit model with identical settings changed 1 answer out of 1,319.
+- **The evidence is borderline, though.** Against full precision, the rerun
+  gave p = 0.048 (0.050 with strict-match answer extraction). A rerun can't
+  add questions, only rule out noise.
 - I predicted "within 2 points" (held) and "no significant difference"
-  (wrong).
-
-<!-- PENDING: the AWQ-vs-AWQ replicate (the noise floor for this test). -->
+  (wrong, narrowly).
 
 ## 8. Prefix caching: a shared prompt, computed once
 
@@ -239,10 +249,113 @@ caching, both engines produced the same throughput (197 vs 202 tokens/s).
 Same work, different people waiting. It's the trade-off from section 2,
 sharper under prompt-heavy load.
 
-## 9. Speculative decoding
+## 9. Speculative decoding: slower with a draft model, faster with EAGLE-3
 
-<!-- PENDING (queued 2026-09-26): none vs Qwen3-0.6B draft (k=4) vs n-gram
-prompt lookup (k=4), Spec-Bench prompts. -->
+The idea: something cheap guesses the next few tokens, and the big model
+checks all the guesses in one pass, keeping the ones it agrees with. Checking
+five tokens costs a memory-bound GPU about what producing one does, so every
+accepted guess should be nearly free. Two ways to guess:
+- **A draft model:** a small model from the same family (Qwen3-0.6B, 4
+  guesses per step).
+- **Prompt lookup (n-gram):** copy what followed the same words earlier in
+  the prompt (4 guesses per step). No extra model.
+
+vLLM 0.30.0 on its older (V1) model runner in every arm, because the newer
+one doesn't support these two methods yet. Prompts from
+[Spec-Bench](https://github.com/hemingkx/Spec-Bench), the standard benchmark
+for speculative decoding (translation, summarization, QA, math, RAG and chat,
+480 prompts). Greedy, 256 tokens, prefix caching off, arms alternated (none,
+draft, n-gram, twice):
+
+| Output tokens/s | No speculation | Draft model | Prompt lookup |
+|---|---|---|---|
+| 1 request | 125, 125 | 81, 81 (**−35%**) | 102, 102 (**−18%**) |
+| 4 requests | 429, 425 | 250, 258 (**−41%**) | 318, 323 (**−25%**) |
+| 16 requests | 1,129, 1,131 | 612, 628 (**−45%**) | 691, 698 (**−39%**) |
+
+- **The draft model guessed well.** About half its guesses were accepted, so
+  each check produced 3.1 tokens on average (I predicted 2-3.5). It was
+  slower anyway: a step took ~36 ms instead of 7.7.
+- **Prompt lookup found little to copy.** Qwen3 thinks before it answers,
+  and in 256 tokens no response got past its thinking, which paraphrases the
+  prompt rather than quoting it. Lookup proposed something on only 22% of
+  steps, for 1.2 tokens per step overall.
+- **The best category for the draft model, math (3.55 tokens per step), was
+  still 1.33x slower** than no speculation.
+
+**Where the time goes.** One request (a math prompt from the same set, 128
+tokens), timed three times and then profiled step by step
+([`experiments/speculative-decoding-profile.sh`](experiments/speculative-decoding-profile.sh)):
+
+| Per step, 1 request | Time | Tokens | GPU busy | GPU idle |
+|---|---|---|---|---|
+| No speculation | 7.7 ms | 1.0 | 7.6 ms | 0.04 ms |
+| Prompt lookup | 11.9 ms | 1.2 | 7.4 ms | 4.5 ms (38%) |
+| Draft model | 37.0 ms | 3.1 | 17.7 ms (big model 7.5, draft 10.1) | 19.3 ms (52%) |
+
+- **The GPU work was affordable.** Had the GPU never waited, the draft model
+  would have produced a token every 5.7 ms and lookup every 6.2 ms, against
+  7.7 ms without speculation: 1.34x and 1.23x faster.
+- **The GPU waited on the CPU.** The CPU hands the GPU its work one small
+  program (a kernel) at a time, and in Python each hand-off is slow. So vLLM
+  records a whole step once as a *CUDA graph* and replays it with a single
+  call. Without speculation, each step here is one replay.
+- **The draft model's guesses aren't one replay.** Its four guessing passes
+  run as 116 graph pieces and 358 separate kernel launches per step, all
+  issued from Python. The CPU couldn't issue them as fast as the GPU finished
+  them.
+- **Prompt lookup lost its graph on most steps.** vLLM records the one-replay
+  version only for steps that check exactly 5 tokens. When lookup found
+  nothing to propose (80% of steps here), the step checked just 1 token and
+  ran as 37 pieces plus up to 108 launches.
+  - Checking 5 tokens cost the GPU the same as checking 1 (7.41 vs 7.38 ms).
+  - vLLM also turns off its CPU/GPU overlap for this method.
+
+**A drafter that's cheap to launch wins.**
+[EAGLE-3](https://arxiv.org/abs/2503.01840) drafts with a single layer that
+reads the big model's own hidden states, instead of running a separate
+28-layer model. With a published EAGLE-3 head for Qwen3-8B
+([RedHatAI/Qwen3-8B-speculator.eagle3](https://huggingface.co/RedHatAI/Qwen3-8B-speculator.eagle3),
+3 guesses per step), same workload, arms alternated (none, GPU lookup,
+EAGLE-3, twice):
+
+| Output tokens/s | No speculation | EAGLE-3 | GPU prompt lookup |
+|---|---|---|---|
+| 1 request | 124, 124 | 161, 161 (**1.30x**) | 86, 88 (0.70x) |
+| 4 requests | 426, 423 | 478, 479 (**1.13x**) | 273, 280 (0.65x) |
+| 16 requests | 1,120, 1,114 | 855, 852 (0.76x) | 617, 625 (0.56x) |
+
+- **Why it works:** its guessing needs 47 kernel launches and 6 graph pieces
+  per step instead of 358 and 116. The GPU idles 16-18% of each step instead
+  of 52%, and each check yields 2.25 tokens. Every prompt category got faster
+  at one request (1.23x for summarization to 1.53x for math).
+- **It's a small-batch tool.** At 16 requests, checking 4 tokens for each of
+  16 streams is real work for the GPU, and speculation lost 24%.
+- **vLLM's GPU version of prompt lookup was worse, not better.** It keeps
+  the CPU/GPU overlap. But steps with nothing to propose still leave the
+  graph, and its own proposer adds 39 launches per step.
+
+**Pinned memory matters here too.** The WSL2 setting from section 4 made each
+draft-model step 14% faster: 36.9-39.2 ms off, 31.4-33.0 ms on (alternated
+twice, plus one earlier pair). The draft model's per-step copies go through
+pageable memory by default, including one copy back to the CPU that it has
+to wait for.
+
+**Not bit-exact.** The draft-model and lookup arms each reproduced
+themselves exactly (48 of 48 responses, run to run). But 8 of 48 draft-model
+responses differed from no speculation (9 of 48 for lookup), always at the
+same token. For example, "A typical blog
+post outline starts with…" became "A typical blog post might start with…".
+Speculation is exact in exact arithmetic, but checking five positions at once
+rounds differently in fp16 than checking one, so near-ties can flip. vLLM's
+docs say as much: lossless "up to the precision limits of hardware numerics".
+It's the batching effect from section 11 again.
+
+I predicted a 1.1-1.6x speedup at one request with the draft model (it was
+0.66x), at most −25% at 16 requests (−45%), 1.0-1.3x for lookup (0.82x), and
+at least 90% identical outputs (83%). After the profile: EAGLE-3 1.15-1.5x at
+one request (1.30x) and −15% to +20% at 16 (−24%), GPU lookup 0.85-1.0x
+(0.70x), and a 10-18% pinned-memory gain for the draft model (14%).
 
 ## 10. Kernels compiled in the middle of traffic
 
@@ -302,7 +415,8 @@ greedy, 256 tokens; each run alone, then inside a busy batch.
 
 ## 13. Running on WSL2: practical notes
 
-- Turn on `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for vLLM (section 4).
+- Turn on `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for vLLM (section 4). It also
+  helps speculative decoding with a draft model (section 9).
 - **GPU memory counts against Windows' memory commit.** A server holding
   ~20 GB of VRAM grew Windows' pagefile on C: by that much, and C: once fell
   to 0.23 GB free mid-run. Leave room on the system drive, or keep the KV
@@ -329,6 +443,17 @@ taught something:
 - **"Pinned memory barely matters at 64 requests (<3%)."** It was 3.8%
   (section 4).
 - **"4-bit and full precision aren't significantly different on GSM8K."**
-  The paired test says they are (section 7).
+  The paired test says they are, narrowly: p = 0.039 (section 7).
 - **"A Docker volume loads weights 2x faster than a mounted folder."** Both
   took ~52 s (section 13).
+- **"A draft model speeds up one request 1.1-1.6x, and costs at most 25% at
+  16."** It ran at 0.66x and cost 45% (section 9).
+- **"Prompt lookup: 1.0-1.3x at one request."** 0.82x: a thinking model's
+  first 256 tokens have little to copy (section 9).
+- **"At least 90% of speculative outputs match plain decoding."** 83%
+  (section 9).
+- **"vLLM's GPU prompt lookup lands at 0.85-1.0x."** 0.70x: its own
+  proposer added more launches than the overlap saved (section 9).
+- **"EAGLE-3 costs at most 15% at 16 requests."** It cost 24% (section 9).
+- **"Pinned memory changes speculative decoding by at most 10% on the older
+  runner."** It cut the draft model's step 14% (section 9).

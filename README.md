@@ -58,13 +58,20 @@ prompt), caching it made the first token arrive 6.6x sooner for one user and
 more than tripled throughput for sixteen. With nothing shared, it cost
 nothing.
 
-**4-bit weights are 2.5x faster and measurably less accurate.** On a
+**4-bit weights are 2.5x faster and slightly less accurate.** On a
 grade-school math benchmark (GSM8K, 1,319 questions), the 4-bit model scored
-86.7% against full precision's 88.3%. That gap is small, but a paired test
-says it's real (p = 0.04).
+86.7% against full precision's 88.3%. The gap is small but not noise:
+rerunning the 4-bit model changed just one answer, and a paired test puts the
+difference at p = 0.04 (0.05 on the rerun).
 
-<!-- PENDING (running 2026-09-26): speculative decoding; the 4-bit
-replicate. -->
+**Speculative decoding was slower, until the guesser got cheap to run.** The
+idea is to let something cheap guess the next few words and have the big
+model check them all at once. With a small separate model guessing, serving
+got 35-45% slower, even though half its guesses were right. A profiler showed
+why: the GPU sat idle half of every step while Python handed it the small
+model's work, 358 pieces per step. EAGLE-3, a guesser built as a single layer
+on top of the big model, needed 47 and made one user's text arrive 1.3x
+faster. It still lost at 16 users, where checking guesses becomes real work.
 
 More detail, with every setup and table: [FINDINGS.md](FINDINGS.md).
 
